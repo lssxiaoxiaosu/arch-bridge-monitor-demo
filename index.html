@@ -1,0 +1,235 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>拱桥智能监测分析与展示平台 · 原型设计Demo</title>
+<link rel="stylesheet" href="css/style.css">
+<script src="libs/echarts.min.js"></script>
+<script type="importmap">
+{
+  "imports": {
+    "three": "./libs/three.module.js",
+    "three/addons/": "./libs/addons/"
+  }
+}
+</script>
+</head>
+<body>
+
+<header id="topbar">
+  <div class="brand">
+    <span class="logo">◈</span>
+    <div class="brand-txt">
+      <h1>拱桥智能建造及智能监测综合实验平台</h1>
+      <p>智能监测分析与展示平台 · 原型设计 Demo（模拟数据）</p>
+    </div>
+  </div>
+  <div class="top-right">
+    <button class="btn btn-warn" id="btnLoadEvent" title="模拟一次加载工况，观察测点响应与预警联动">模拟加载工况</button>
+    <span class="chip chip-demo">原型演示 · 模拟数据</span>
+    <span class="chip" id="clock">--:--:--</span>
+    <span class="chip chip-ok" id="connChip">● 采集在线 8/8</span>
+  </div>
+</header>
+
+<nav id="sidenav">
+  <button class="nav-btn active" data-view="twin"><i>◧</i><span>三维<br>数字孪生</span></button>
+  <button class="nav-btn" data-view="dash"><i>▤</i><span>监测<br>总览</span></button>
+  <button class="nav-btn" data-view="history"><i>∿</i><span>曲线<br>查询</span></button>
+  <button class="nav-btn" data-view="alarm"><i>⚠</i><span>预警<br>管理</span><em class="nav-badge" id="navAlarmBadge" hidden>0</em></button>
+  <button class="nav-btn" data-view="hoist"><i>⌁</i><span>吊装<br>模拟</span></button>
+  <button class="nav-btn" data-view="devices"><i>☰</i><span>设备<br>测点</span></button>
+</nav>
+
+<main id="views">
+
+  <!-- ① 三维数字孪生 -->
+  <section id="view-twin" class="view active">
+    <aside class="side-panel left">
+      <div class="panel-title">图层控制</div>
+      <div id="layerList" class="layer-list"><div class="dim">模型加载后生成…</div></div>
+      <div class="panel-title">测点显示</div>
+      <div id="sensorToggles" class="layer-list"></div>
+      <div class="panel-title">视角与显示</div>
+      <div class="btn-grid">
+        <button class="btn" data-cam="all">全桥</button>
+        <button class="btn" data-cam="arch">拱肋</button>
+        <button class="btn" data-cam="deck">桥面</button>
+        <button class="btn" data-cam="crown">拱顶</button>
+        <button class="btn" id="btnRotate">自动旋转</button>
+        <button class="btn" id="btnWire">线框</button>
+      </div>
+      <div class="panel-title">模型信息</div>
+      <div id="modelInfo" class="kv dim">加载中…</div>
+    </aside>
+
+    <div class="center-stage">
+      <div id="twinCanvas"></div>
+      <div id="loadOverlay">
+        <div class="load-box">
+          <div class="load-title">三维数字孪生模型加载中</div>
+          <div class="bar"><div class="bar-in" id="loadBar"></div></div>
+          <div class="load-txt" id="loadTxt">准备…</div>
+        </div>
+      </div>
+      <div id="tip3d" hidden></div>
+      <div class="legend" id="legend3d"></div>
+      <div class="stage-tag">试验模型 1:100 · 计算跨径 6.0 m（模型已按实验平台尺寸归一化显示）</div>
+    </div>
+
+    <aside class="side-panel right">
+      <div class="panel-title">选中对象</div>
+      <div id="selInfo" class="sel-info"><div class="dim">在模型中点击测点或构件查看信息</div></div>
+      <div id="selSpark" class="spark"></div>
+      <div class="panel-title">实时值 · 关键测点</div>
+      <div id="liveList" class="live-list"></div>
+    </aside>
+  </section>
+
+  <!-- ② 监测总览 -->
+  <section id="view-dash" class="view">
+    <div class="kpi-row" id="kpiRow"></div>
+    <div class="dash-grid">
+      <div class="card chart-card wide">
+        <div class="card-h">拱肋应变实时曲线（με）</div>
+        <div id="chStrain" class="chart"></div>
+      </div>
+      <div class="card side-col">
+        <div class="card-h">实时预警</div>
+        <div id="dashAlarms" class="alarm-mini"></div>
+      </div>
+      <div class="card chart-card">
+        <div class="card-h">吊杆索力分布（kN）</div>
+        <div id="chCable" class="chart"></div>
+      </div>
+      <div class="card chart-card">
+        <div class="card-h">桥面竖向动位移（mm）</div>
+        <div id="chDisp" class="chart"></div>
+      </div>
+      <div class="card chart-card">
+        <div class="card-h">环境量（温度 / 湿度 / 风速）</div>
+        <div id="chEnv" class="chart"></div>
+      </div>
+    </div>
+  </section>
+
+  <!-- ③ 曲线查询 -->
+  <section id="view-history" class="view">
+    <aside class="side-panel left">
+      <div class="panel-title">查询条件</div>
+      <label class="fld">测点类型
+        <select id="hsType"></select>
+      </label>
+      <label class="fld">测点
+        <select id="hsSensor"></select>
+      </label>
+      <label class="fld">时间范围
+        <select id="hsRange">
+          <option value="1">近 1 小时</option>
+          <option value="24" selected>近 24 小时</option>
+          <option value="168">近 7 天</option>
+        </select>
+      </label>
+      <div class="btn-grid">
+        <button class="btn btn-pri" id="btnHsQuery">查询</button>
+        <button class="btn" id="btnHsCsv">导出 CSV</button>
+      </div>
+      <div class="panel-title">说明</div>
+      <div class="dim small">历史数据由演示引擎按测点特性生成（含日温度变化、随机脉动与车辆激励），用于验证查询、缩放与导出链路。</div>
+    </aside>
+    <div class="center-stage">
+      <div class="card chart-card fill">
+        <div class="card-h" id="hsTitle">测点曲线</div>
+        <div id="chHistory" class="chart fill"></div>
+      </div>
+    </div>
+  </section>
+
+  <!-- ④ 预警管理 -->
+  <section id="view-alarm" class="view">
+    <div class="kpi-row" id="alarmStats"></div>
+    <div class="card table-card">
+      <div class="card-h with-tools">
+        预警记录
+        <span class="tools">
+          <select id="almLevel"><option value="">全部级别</option><option value="1">一级</option><option value="2">二级</option><option value="3">三级</option></select>
+          <select id="almStatus"><option value="">全部状态</option><option value="未确认">未确认</option><option value="已确认">已确认</option><option value="已恢复">已恢复</option></select>
+        </span>
+      </div>
+      <div class="tbl-wrap">
+        <table class="tbl" id="alarmTable">
+          <thead><tr><th>时间</th><th>测点</th><th>位置</th><th>类型</th><th>当前值</th><th>阈值</th><th>级别</th><th>状态</th><th>操作</th></tr></thead>
+          <tbody></tbody>
+        </table>
+        <div class="empty" id="alarmEmpty">当前无预警记录，系统运行正常。</div>
+      </div>
+    </div>
+  </section>
+
+  <!-- ⑤ 吊装模拟 -->
+  <section id="view-hoist" class="view">
+    <div class="center-stage">
+      <div id="hoistCanvas"></div>
+      <div class="hoist-head">
+        <div class="hoist-title">斜拉扣挂缆索吊装 · 工艺模拟</div>
+        <div class="hoist-prog" id="hoistProg">第 1 / 23 件</div>
+      </div>
+      <div class="hoist-side">
+        <div class="panel-title">工艺步骤</div>
+        <ol id="hoistSteps" class="hoist-steps"></ol>
+        <div class="panel-title">索力监视（示意）</div>
+        <div id="hoistCable" class="kv"></div>
+      </div>
+      <div class="hoist-ctrl">
+        <button class="btn btn-pri" id="hoistPlay">▶ 播放</button>
+        <button class="btn" id="hoistNext">⏭ 下一节段</button>
+        <button class="btn" id="hoistReset">↺ 复位</button>
+        <label class="fld inline">速度
+          <select id="hoistSpeed"><option value="0.5">0.5×</option><option value="1" selected>1×</option><option value="2">2×</option><option value="4">4×</option></select>
+        </label>
+        <span class="hoist-note" id="hoistNote">说明：按"两岸对称、先拱脚后拱顶"顺序逐节段悬拼，拱顶设可拆卸合龙段。</span>
+      </div>
+    </div>
+  </section>
+
+  <!-- ⑥ 设备测点 -->
+  <section id="view-devices" class="view">
+    <div class="kpi-row" id="devStats"></div>
+    <div class="dev-grid">
+      <div class="card table-card">
+        <div class="card-h">数据采集单元（8 台 · AC380V 供电）</div>
+        <div class="tbl-wrap">
+          <table class="tbl" id="devTable">
+            <thead><tr><th>编号</th><th>类型</th><th>通道</th><th>接入测点</th><th>采样频率</th><th>状态</th><th>最近心跳</th></tr></thead>
+            <tbody></tbody>
+          </table>
+        </div>
+      </div>
+      <div class="card table-card">
+        <div class="card-h">测点分区统计（与《实施技术方案》表5-2 一致）</div>
+        <div class="tbl-wrap">
+          <table class="tbl" id="zoneTable">
+            <thead><tr><th>分区</th><th>部位</th><th>应变测点</th><th>本演示挂接</th></tr></thead>
+            <tbody></tbody>
+          </table>
+        </div>
+      </div>
+      <div class="card table-card">
+        <div class="card-h">传感器类型统计</div>
+        <div class="tbl-wrap">
+          <table class="tbl" id="sensTable">
+            <thead><tr><th>类型</th><th>设计数量</th><th>演示挂接</th><th>在线率</th></tr></thead>
+            <tbody></tbody>
+          </table>
+        </div>
+      </div>
+    </div>
+  </section>
+
+</main>
+
+<div id="toast"></div>
+<script type="module" src="js/app.js"></script>
+</body>
+</html>
