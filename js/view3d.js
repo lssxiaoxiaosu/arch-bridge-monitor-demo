@@ -7,6 +7,8 @@ import { RoomEnvironment } from 'three/addons/environments/RoomEnvironment.js';
 import { TYPES, Mock, sensorShow } from './mock.js';
 
 const $ = (id) => document.getElementById(id);
+// 地形/影像底座类材质：参与显示，但不参与跨径归一化与测点寻位量算
+const AUX_MAT_RE = /soil|terrain|地理|影像/i;
 
 export const Twin = {
   ready: false, active: true, span: 6, rise: 1, yDeck: 0,
@@ -39,7 +41,7 @@ export const Twin = {
 
     this.scene = new THREE.Scene();
     this.scene.background = new THREE.Color(0x0a1220);
-    this.scene.fog = new THREE.Fog(0x0a1220, 14, 34);
+    this.scene.fog = new THREE.Fog(0x0a1220, 16, 44);
 
     this.camera = new THREE.PerspectiveCamera(46, w / h, 0.01, 100);
     this.camera.position.set(4.6, 2.6, 5.2);
@@ -142,7 +144,7 @@ export const Twin = {
         if (xhr.total) {
           const p = Math.round(xhr.loaded / xhr.total * 100);
           this.ui.bar.style.width = p + '%';
-          this.ui.txt.textContent = p < 100 ? `下载模型文件 ${p}%（14.9 MB）` : '正在解码几何数据（Draco）…';
+          this.ui.txt.textContent = p < 100 ? `下载模型文件 ${p}%` : '正在解码几何数据（Draco）…';
         }
       },
       (err) => {
@@ -154,8 +156,8 @@ export const Twin = {
   _onLoaded(gltf, ms) {
     this.root = gltf.scene;
     this.scene.add(this.root);
-    this._normalize();
     this._collectMaterials();
+    this._normalize();
     const layout = this._computeLayout();
     this.layout = layout;
     this._assignPositions(layout);
@@ -171,25 +173,32 @@ export const Twin = {
       `<div>拱顶离桥面 <b>${this.rise.toFixed(2)} m</b></div>` +
       `<div>顶点 <b>${(U.verts / 1e4).toFixed(1)} 万</b> · 三角面 <b>${(U.tris / 1e4).toFixed(1)} 万</b></div>` +
       `<div>构件网格 <b>${U.count}</b> · 材质组 <b>${this.matGroups.length}</b></div>` +
-      `<div>加载耗时 <b>${(ms / 1000).toFixed(1)} s</b></div>`;
+      `<div>加载耗时 <b>${(ms / 1000).toFixed(1)} s</b></div>` +
+      (this._hasAux ? `<div class="dim small">含地形影像底座（不参与量算）</div>` : '');
     this.ui.info.classList.remove('dim');
     window.__checks && (window.__checks.modelLoaded = true);
   },
 
-  // 归一化到试验模型尺寸：跨度 6 m，底部对齐 y=0，中心对齐 xz=0
+  // 归一化到试验模型尺寸：以桥梁构件（排除地形底座）跨度为 6 m，桥梁中心对齐 xz=0，
+  // 全模型（含地形）最低点对齐 y=0
   _normalize() {
     this.root.updateMatrixWorld(true);
-    let box = new THREE.Box3().setFromObject(this.root);
-    const size = box.getSize(new THREE.Vector3());
+    const bb = new THREE.Box3();
+    for (const m of this.bridgeMeshes) bb.expandByObject(m);
+    const size = bb.getSize(new THREE.Vector3());
     const spanAxis = size.x >= size.z ? 'x' : 'z';
     this.spanAxis = spanAxis;
     this.root.scale.setScalar(6 / size[spanAxis]);
     this.root.updateMatrixWorld(true);
-    box = new THREE.Box3().setFromObject(this.root);
-    const c = box.getCenter(new THREE.Vector3());
-    this.root.position.x -= c.x; this.root.position.z -= c.z; this.root.position.y -= box.min.y;
+    const bb2 = new THREE.Box3();
+    for (const m of this.bridgeMeshes) bb2.expandByObject(m);
+    const c = bb2.getCenter(new THREE.Vector3());
+    const gAll = new THREE.Box3().setFromObject(this.root);
+    this.root.position.x -= c.x; this.root.position.z -= c.z; this.root.position.y -= gAll.min.y;
     this.root.updateMatrixWorld(true);
     this.bbox = new THREE.Box3().setFromObject(this.root);
+    this.gbox = this.bbox;
+    this.bridgeBox = (() => { const b = new THREE.Box3(); for (const m of this.bridgeMeshes) b.expandByObject(m); return b; })();
   },
 
   _collectMaterials() {
@@ -209,8 +218,13 @@ export const Twin = {
     let i = 0;
     this.matGroups = [...map.entries()].map(([mat, meshes]) => {
       const col = mat.color ? '#' + mat.color.getHexString() : '#8899aa';
-      return { idx: i++, mat, meshes, color: col, name: mat.name || `材质组 ${i}`, visible: true };
+      const raw = mat.name || `材质组 ${i + 1}`;
+      return { idx: i++, mat, meshes, color: col, name: raw, visible: true,
+        disp: raw.replace(/^PN_/, '').replace(/_#[0-9A-Fa-f]{6}$/, '') };
     });
+    this._hasAux = this.matGroups.some(g => AUX_MAT_RE.test(g.name));
+    this.bridgeMeshes = this.matGroups.filter(g => !AUX_MAT_RE.test(g.name)).flatMap(g => g.meshes);
+    if (!this.bridgeMeshes.length) this.bridgeMeshes = this.meshes.slice(); // 兜底：无法识别时全算
     // 唯一几何统计（GLB 中多节点共享网格，避免重复计数）
     const uniq = new Set();
     let verts = 0, tris = 0;
@@ -223,37 +237,39 @@ export const Twin = {
     this._uniqGeo = { count: uniq.size, verts, tris };
   },
 
-  // 顶点包络分析：自动寻找拱顶线、桥面高程、拱肋区段与两侧主钢管横向位置
+  // 顶点包络分析：只统计桥梁构件，自动寻找拱顶线、桥面高程、拱肋区段与两侧主钢管横向位置
   _computeLayout() {
-    const b = this.bbox, NB = 240, NY = 160;
+    const b = this.bridgeBox, NB = 240, NY = 160;
     const span = this.spanAxis === 'x' ? b.max.x - b.min.x : b.max.z - b.min.z;
-    const minX = b.min.x, maxX = b.max.x, maxY = b.max.y;
+    const minX = b.min.x, maxX = b.max.x, maxY = b.max.y, minY = b.min.y;
     const env = Array.from({ length: NB }, () => [-Infinity, -Infinity]);
     const yHist = new Array(NY).fill(0);
     const samples = []; const p = new THREE.Vector3();
-    let verts = 0, tris = 0, stride = 1;
+    let verts = 0, stride = 1;
 
-    for (const mesh of this.meshes) {
+    for (const mesh of this.bridgeMeshes) {
       verts += mesh.geometry.attributes.position.count;
-      tris += mesh.userData.tris;
     }
     stride = Math.max(1, Math.floor(verts / 120000));
 
-    for (const mesh of this.meshes) {
+    for (const mesh of this.bridgeMeshes) {
       const pos = mesh.geometry.attributes.position, mw = mesh.matrixWorld;
       for (let i = 0; i < pos.count; i += stride) {
         p.fromBufferAttribute(pos, i).applyMatrix4(mw);
         const xb = Math.min(NB - 1, Math.max(0, Math.floor((p.x - minX) / (maxX - minX) * NB)));
         const zb = p.z >= 0 ? 1 : 0;
         if (p.y > env[xb][zb]) env[xb][zb] = p.y;
-        const yb = Math.min(NY - 1, Math.floor(p.y / maxY * NY));
+        const yb = Math.min(NY - 1, Math.max(0, Math.floor((p.y - minY) / (maxY - minY) * NY)));
         yHist[yb]++;
         if (samples.length < 150000) samples.push(p.x, p.y, p.z);
       }
     }
     // 桥面高程：顶点数最多的 y 层（桥面板为最大平面）
-    let yDeck = 0, best = -1;
-    for (let i = 2; i < NY - 2; i++) if (yHist[i] > best && i / NY * maxY > 0.12 * maxY) { best = yHist[i]; yDeck = i / NY * maxY; }
+    let yDeck = minY, best = -1;
+    for (let i = 2; i < NY - 2; i++) {
+      const yv = minY + i / NY * (maxY - minY);
+      if (yHist[i] > best && yv > minY + 0.12 * (maxY - minY)) { best = yHist[i]; yDeck = yv; }
+    }
     const rise = maxY - yDeck;
 
     // 拱肋区段：包络明显高于桥面的最长连续段
@@ -280,7 +296,7 @@ export const Twin = {
     const zDeckHalf = Math.max(0.3, q(zDeck, 0.85));       // 桥面半宽
 
     this.yDeck = yDeck; this.rise = rise;
-    return { env, NB, minX, maxX, maxY, yDeck, rise, archX0, archX1, zT1, zT2, zDeckHalf, verts, tris };
+    return { env, NB, minX, maxX, maxY, yDeck, rise, archX0, archX1, zT1, zT2, zDeckHalf, verts, tris: this._uniqGeo.tris };
   },
 
   envY(x, zb) {
@@ -357,7 +373,7 @@ export const Twin = {
   _buildLayerPanel() {
     this.ui.layers.innerHTML = this.matGroups.map((g, i) => `
       <label class="layer-item"><input type="checkbox" checked data-g="${i}">
-      <span class="layer-dot" style="background:${g.color}"></span>${g.name}
+      <span class="layer-dot" style="background:${g.color}"></span>${g.disp}
       <span class="layer-count">${g.meshes.length}</span></label>`).join('');
     this.ui.layers.querySelectorAll('input').forEach(cb => {
       cb.addEventListener('change', () => {
@@ -472,8 +488,9 @@ export const Twin = {
   flyTo(kind) {
     const L = this.layout || { maxY: 1.4, yDeck: 0.5, rise: 0.9, archX0: -2.6, archX1: 2.6 };
     const target = new THREE.Vector3(0, L.yDeck + L.rise * 0.35, 0);
+    const gs = this.gbox ? this.gbox.getSize(new THREE.Vector3()) : new THREE.Vector3(7, 2, 4);
     const P = {
-      all: [0, L.maxY * 2.3, 5.6],
+      all: [0, L.maxY * 2.2 + gs.y * 0.55, Math.max(5.6, Math.max(gs.x, gs.z) * 1.18)],
       arch: [L.archX0 * 0.55, L.yDeck + L.rise * 1.9, 3.6],
       deck: [-1.8, L.yDeck + 0.75, 3.0],
       crown: [0.4, L.maxY + 0.85, 1.6],
